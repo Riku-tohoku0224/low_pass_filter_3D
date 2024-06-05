@@ -1,71 +1,104 @@
 import open3d as o3d
 import numpy as np
+import matplotlib.pyplot as plt
 
-def apply_low_pass_filter_to_point_cloud(pcd_path, filter_size):
-    # 点群データを読み込み
+def apply_low_pass_filter_to_point_cloud(pcd_path, resolution=0.01):
     pcd = o3d.io.read_point_cloud(pcd_path)
     if pcd.is_empty():
         raise FileNotFoundError("点群ファイルがない")
 
-    # numpy配列に変換
-    points = np.asarray(pcd.points)  # 点の座標
-    colors = np.asarray(pcd.colors)  # 色情報
-
-    # 各軸のデータを取得
+    points = np.asarray(pcd.points)
     x_data, y_data, z_data = points[:, 0], points[:, 1], points[:, 2]
 
-    
+    x_edges = np.arange(x_data.min(), x_data.max() + resolution, resolution)
+    y_edges = np.arange(y_data.min(), y_data.max() + resolution, resolution)
 
-    # 各軸ごとにフーリエ変換を適用する関数
-    def low_pass_filter(data, filter_size):
-        # 1次元フーリエ変換を実行
-        f = np.fft.fft(data)
-        fshift = np.fft.fftshift(f)
+    z_grid = np.full((len(x_edges) - 1, len(y_edges) - 1, 2), np.nan)
+    for i in range(len(x_data)):
+        x_idx = np.searchsorted(x_edges, x_data[i]) - 1
+        y_idx = np.searchsorted(y_edges, y_data[i]) - 1
+        if np.isnan(z_grid[x_idx, y_idx, 0]) or abs(z_data[i]) > abs(z_grid[x_idx, y_idx, 0]):
+            z_grid[x_idx, y_idx, 0] = z_data[i]
+            z_grid[x_idx, y_idx, 1] = 1
 
-        # マスクの作成
-        mask = np.zeros(data.shape, dtype=bool)
-        center = data.shape[0] // 2
-        mask[center - filter_size:center + filter_size] = True
+    z_grid[np.isnan(z_grid[:, :, 0]), 1] = 0
 
-        # フィルタを適用
-        fshift_filtered = fshift * mask
+    return z_grid, x_edges, y_edges
 
-        # フィルタリング前後の非ゼロ要素のバイト数を計算
-        original_nonzero_elements = np.count_nonzero(fshift)
-        filtered_nonzero_elements = np.count_nonzero(fshift_filtered)
-        element_size = fshift.itemsize
+def apply_low_pass_filter(z_grid, filter_size):
+    rows, cols, _ = z_grid.shape
+    f = np.fft.fft2(np.nan_to_num(z_grid[:,:,0]))
+    fshift = np.fft.fftshift(f)
 
-        original_nonzero_bytes = original_nonzero_elements * element_size
-        filtered_nonzero_bytes = filtered_nonzero_elements * element_size
+    crow, ccol = int(rows / 2), int(cols / 2)
+    mask = np.zeros((rows, cols), np.uint8)
+    mask[crow-filter_size:crow+filter_size, ccol-filter_size:ccol+filter_size] = 1
 
-        print(f"Original non-zero frequency data size: {original_nonzero_bytes} bytes")
-        print(f"Filtered non-zero frequency data size: {filtered_nonzero_bytes} bytes")
+    fshift_masked = fshift * mask
+    f_ishift = np.fft.ifftshift(fshift_masked)
+    img_back = np.fft.ifft2(f_ishift)
+    img_back = np.real(img_back)
 
-        # 逆フーリエ変換
-        f_ishift = np.fft.ifftshift(fshift_filtered)
-        filtered_data = np.fft.ifft(f_ishift).real
+    filtered_z_grid = np.zeros_like(z_grid)
+    filtered_z_grid[:,:,0] = img_back
+    filtered_z_grid[:,:,1] = z_grid[:,:,1]
 
-        return filtered_data
+    non_zero_before = np.count_nonzero(fshift)
+    non_zero_after = np.count_nonzero(fshift_masked)
 
-    # 各軸にフィルタを適用
-    filtered_x = low_pass_filter(x_data, filter_size)
-    filtered_y = low_pass_filter(y_data, filter_size)
-    filtered_z = low_pass_filter(z_data, filter_size)
+    print(f"Data size in frequency domain before filtering: {non_zero_before}")
+    print(f"Data size in frequency domain after filtering : {non_zero_after}")
 
-    # フィルタ適用後の点群を作成
-    filtered_points = np.vstack((filtered_x, filtered_y, filtered_z)).T
+    # 描画部分
+    plt.figure(figsize=(12, 8))
 
-    # 新しい点群を作成
+    plt.subplot(2, 2, 1)
+    plt.title("Original Fourier Transform")
+    plt.imshow(np.log(np.abs(f) + 1), cmap='gray')
+    plt.colorbar()
+
+    plt.subplot(2, 2, 2)
+    plt.title("Shifted Fourier Transform")
+    plt.imshow(np.log(np.abs(fshift) + 1), cmap='gray')
+    plt.colorbar()
+
+    plt.subplot(2, 2, 3)
+    plt.title("Masked Fourier Transform")
+    plt.imshow(np.log(np.abs(fshift_masked) + 1), cmap='gray')
+    plt.colorbar()
+
+    plt.subplot(2, 2, 4)
+    plt.title("Filtered Inverse Fourier Transform")
+    plt.imshow(img_back, cmap='gray')
+    plt.colorbar()
+
+    plt.tight_layout()
+    plt.show()
+
+    return filtered_z_grid
+
+def regenerate_point_cloud(x_edges, y_edges, filtered_z_grid):
+    mask = filtered_z_grid[:,:,1].ravel() == 1
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2
+    x_coords, y_coords = np.meshgrid(x_centers, y_centers, indexing='ij')
+
+    new_points = np.vstack((x_coords.ravel()[mask], y_coords.ravel()[mask], filtered_z_grid[:,:,0].ravel()[mask])).T
+
     filtered_pcd = o3d.geometry.PointCloud()
-    filtered_pcd.points = o3d.utility.Vector3dVector(filtered_points)
-    filtered_pcd.colors = o3d.utility.Vector3dVector(colors[:filtered_points.shape[0], :])  # 色情報を適用
+    filtered_pcd.points = o3d.utility.Vector3dVector(new_points)
 
-    # 元の点群を表示
-    o3d.visualization.draw_geometries([pcd], window_name="Original Point Cloud")
+    return filtered_pcd
 
-    # フィルタ適用後の点群を表示
-    o3d.visualization.draw_geometries([filtered_pcd], window_name="Filtered Point Cloud")
+pcd_path = "/home/riku-suzuki/python_tutorial/tottori_map_50.pcd"
+filter_size = 1500
 
-# フィルターの閾値を設定
-filter_size = 60000  # フィルターのサイズを適宜調整
-apply_low_pass_filter_to_point_cloud("/home/riku-suzuki/python_tutorial/tottori_map_50.pcd", filter_size)
+pcd = o3d.io.read_point_cloud(pcd_path)
+coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
+o3d.visualization.draw_geometries([pcd, coordinate_frame])
+
+z_grid, x_edges, y_edges = apply_low_pass_filter_to_point_cloud(pcd_path)
+filtered_z_grid = apply_low_pass_filter(z_grid, filter_size)
+
+new_pcd = regenerate_point_cloud(x_edges, y_edges, filtered_z_grid)
+o3d.visualization.draw_geometries([new_pcd, coordinate_frame])
