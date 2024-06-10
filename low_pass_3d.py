@@ -32,7 +32,10 @@ def apply_low_pass_filter(z_grid, filter_size):
 
     crow, ccol = int(rows / 2), int(cols / 2)
     mask = np.zeros((rows, cols), np.uint8)
-    mask[crow-filter_size:crow+filter_size, ccol-filter_size:ccol+filter_size] = 1
+    for i in range(rows):
+        for j in range(cols):
+            if (i - crow)**2 + (j - ccol)**2 <= filter_size**2:
+                mask[i, j] = 1
 
     fshift_masked = fshift * mask
     f_ishift = np.fft.ifftshift(fshift_masked)
@@ -90,12 +93,26 @@ def regenerate_point_cloud(x_edges, y_edges, filtered_z_grid):
 
     return filtered_pcd
 
-pcd_path = "/home/riku-suzuki/python_tutorial/tottori_map_50.pcd"
-filter_size = 1500
+pcd_path = r"C:\Users\riku0\Downloads\tottori_map_50.pcd"
+filter_size = 500 #[LP/mm]や[cycle/mm]
 
+# 点群を読み込む
 pcd = o3d.io.read_point_cloud(pcd_path)
+
+# カラー属性を削除する
+if pcd.has_colors():
+    pcd.colors = o3d.utility.Vector3dVector([])
+
+# 座標フレームを作成する
 coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0)
-o3d.visualization.draw_geometries([pcd, coordinate_frame])
+
+# Visualizerを使って点群と座標フレームを表示する
+vis = o3d.visualization.Visualizer()
+vis.create_window()
+vis.add_geometry(pcd)
+vis.add_geometry(coordinate_frame)
+vis.run()
+vis.destroy_window()
 
 z_grid, x_edges, y_edges = apply_low_pass_filter_to_point_cloud(pcd_path)
 filtered_z_grid = apply_low_pass_filter(z_grid, filter_size)
